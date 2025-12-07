@@ -1,143 +1,134 @@
 import Foundation
 import AppKit
 
-// CONFIG — НЕ ЗАБУДЬ ПОСТАВИТЬ СВОЙ baseURL
+// MARK: - Config
+
 struct Config {
+    // ЗДЕСЬ ДОЛЖЕН БЫТЬ ТВОЙ URL к папке с картинками на GitHub
     // Пример:
     // https://raw.githubusercontent.com/USERNAME/daily-wallpapers/main/wallpapers
-    static let baseURL = URL(string: "https://raw.githubusercontent.com/ruzvaliakhmetov/daily-wallpapers/main/wallpapers/")!
-
-    static let appName = "DailyWallpaper"
-    static let fileManager = FileManager.default
-
-    static var appSupportFolder: URL {
-        let base = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent(appName, isDirectory: true)
-    }
-
-    static var stateFile: URL {
-        appSupportFolder.appendingPathComponent("state.json")
-    }
+    static let baseURL = URL(string: "https://raw.githubusercontent.com/ruzvaliakhmetov/daily-wallpapers/main/wallpapers")!
 
     // Имя fallback-картинки в репозитории
     static let fallbackFileName = "fallback.jpg"
+
+    static let fileManager = FileManager.default
 }
 
-struct State: Codable {
-    let lastDate: String
-}
+// MARK: - Helpers
 
 func todayString() -> String {
     let formatter = DateFormatter()
     formatter.calendar = Calendar(identifier: .gregorian)
     formatter.locale = Locale(identifier: "en_US_POSIX")
 
-    // Вариант 1: у всех одна и та же дата по UTC:
+    // Если хочешь, чтобы у всех была одна дата по UTC:
     formatter.timeZone = TimeZone(secondsFromGMT: 0)
 
-    // Вариант 2: локальное время Mac:
+    // Если хочешь по локальному времени мака, можно так:
     // formatter.timeZone = .current
 
     formatter.dateFormat = "yyyy-MM-dd"
-    return formatter.string(from: Date())
-}
-
-func loadState() -> State? {
-    let url = Config.stateFile
-    guard Config.fileManager.fileExists(atPath: url.path) else { return nil }
-
-    do {
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode(State.self, from: data)
-    } catch {
-        return nil
-    }
-}
-
-func saveState(_ state: State) {
-    do {
-        try Config.fileManager.createDirectory(
-            at: Config.appSupportFolder,
-            withIntermediateDirectories: true
-        )
-
-        let data = try JSONEncoder().encode(state)
-        try data.write(to: Config.stateFile, options: [.atomic])
-    } catch {
-        fputs("Failed to save state: \(error)\n", stderr)
-    }
+    let result = formatter.string(from: Date())
+    print("Today is \(result)")
+    return result
 }
 
 enum WallpaperError: Error {
-    case downloadFailed(String) // message
+    case downloadFailed(String)
+    case setWallpaperFailed(String)
 }
 
 func downloadImage(from remoteURL: URL, localName: String) throws -> URL {
-    let data = try Data(contentsOf: remoteURL)
+    print("Trying to download: \(remoteURL.absoluteString)")
+
+    let data: Data
+    do {
+        data = try Data(contentsOf: remoteURL)
+    } catch {
+        throw WallpaperError.downloadFailed("Failed to load data from \(remoteURL): \(error)")
+    }
 
     let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
     let localURL = tmpDir.appendingPathComponent(localName)
-    try data.write(to: localURL, options: [.atomic])
 
+    do {
+        try data.write(to: localURL, options: [.atomic])
+    } catch {
+        throw WallpaperError.downloadFailed("Failed to write file to \(localURL.path): \(error)")
+    }
+
+    print("Saved image to temp: \(localURL.path)")
     return localURL
 }
 
-/// Скачиваем картинку по дате, если не получилось — пробуем fallback.
-/// Если и fallback не доступен — кидаем ошибку.
+/// Пытаемся скачать картинку по дате, если не получилось — пробуем fallback.
+/// Если и fallback не удаётся — кидаем ошибку.
 func downloadWallpaper(for dateString: String) throws -> URL {
+    // Основная картинка по дате
     let primaryURL = Config.baseURL.appendingPathComponent("\(dateString).jpg")
 
-    // 1. Пытаемся скачать картинку по дате
     if let primary = try? downloadImage(
         from: primaryURL,
         localName: "dailywallpaper-\(dateString).jpg"
     ) {
+        print("Using primary image for date \(dateString)")
         return primary
+    } else {
+        print("Primary image for \(dateString) not available, trying fallback...")
     }
 
-    // 2. Пытаемся скачать fallback
+    // Fallback
     let fallbackURL = Config.baseURL.appendingPathComponent(Config.fallbackFileName)
+
     if let fallback = try? downloadImage(
         from: fallbackURL,
         localName: "dailywallpaper-fallback.jpg"
     ) {
+        print("Using fallback image")
         return fallback
     }
 
-    throw WallpaperError.downloadFailed("Neither \(primaryURL.lastPathComponent) nor fallback found")
+    throw WallpaperError.downloadFailed("Neither \(primaryURL.lastPathComponent) nor \(Config.fallbackFileName) could be downloaded")
 }
 
 func setWallpaper(from localURL: URL) throws {
     let workspace = NSWorkspace.shared
+    let screens = NSScreen.screens
 
-    for screen in NSScreen.screens {
-        try workspace.setDesktopImageURL(localURL, for: screen, options: [:])
+    guard !screens.isEmpty else {
+        throw WallpaperError.setWallpaperFailed("No screens found")
+    }
+
+    for screen in screens {
+        do {
+            try workspace.setDesktopImageURL(localURL, for: screen, options: [:])
+            print("Set wallpaper for screen: \(screen)")
+        } catch {
+            throw WallpaperError.setWallpaperFailed("Failed to set wallpaper: \(error)")
+        }
     }
 }
+
+// MARK: - Main
 
 func mainLogic() {
     let today = todayString()
 
-    // Если уже меняли обои сегодня — выходим
-    if let state = loadState(), state.lastDate == today {
-        return
-    }
-
     do {
         let fileURL = try downloadWallpaper(for: today)
         try setWallpaper(from: fileURL)
-
-        saveState(State(lastDate: today))
+        print("✅ Wallpaper updated successfully")
     } catch let error as WallpaperError {
         switch error {
         case .downloadFailed(let message):
             fputs("Download failed: \(message)\n", stderr)
+        case .setWallpaperFailed(let message):
+            fputs("Set wallpaper failed: \(message)\n", stderr)
         }
     } catch {
-        fputs("Error in DailyWallpaper: \(error)\n", stderr)
+        fputs("Unexpected error in DailyWallpaper: \(error)\n", stderr)
     }
-
-    // После выхода из mainLogic программа завершится сама
 }
 
 mainLogic()
